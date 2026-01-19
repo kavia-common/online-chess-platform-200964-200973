@@ -8,6 +8,7 @@ import { StatusBar } from "../components/StatusBar";
 import { Controls } from "../components/Controls";
 import { PromotionModal } from "../components/PromotionModal";
 import { useToast } from "../components/ToastProvider";
+import { ChatPanel } from "../components/ChatPanel";
 
 import { useLegalMoves } from "../hooks/useLegalMoves";
 import { needsPromotion } from "../utils/promotion";
@@ -65,10 +66,13 @@ function useMatchRoomController() {
 
       if (!move) return { ok: false, reason: "Illegal move." };
 
+      // Attach timestamp so enhanced MoveList can render times even in local-first mode.
+      move.ts = Date.now();
+
       // Optimistic local update
       match.applyAuthoritativeState({ fen: chess.fen() });
-      // Track last move for highlight
-      // (MatchContext will also update from server events; this is ok)
+      // Highlight last move
+      // (server may also broadcast; that's ok)
       // eslint-disable-next-line react/no-unused-state
       // no-op
 
@@ -160,6 +164,11 @@ function MatchRoomInner() {
       });
     }
   }, [match.env.networkEnabled, toast]);
+
+  const chatDisabled = useMemo(() => {
+    // Chat should be usable offline (local-echo). Only disable if no handler.
+    return typeof match.sendChat !== "function";
+  }, [match.sendChat]);
 
   return (
     <div className="container">
@@ -279,16 +288,12 @@ function MatchRoomInner() {
 
           <div>
             <div className="sidebarSectionTitle">Chat</div>
-            <div className="statusCard" style={{ maxHeight: 180, overflow: "auto" }}>
-              {match.chat.length === 0 ? <div className="smallNote">No messages yet.</div> : null}
-              {match.chat.slice(-20).map((m) => (
-                <div key={m.id || `${m.ts}-${m.message}`} style={{ marginBottom: 8 }}>
-                  <strong>{m.from || "player"}:</strong> {m.message}
-                </div>
-              ))}
-            </div>
-
-            <ChatComposer onSend={(msg) => match.sendChat(msg)} />
+            <ChatPanel messages={match.chat} onSend={(msg) => match.sendChat(msg)} disabled={chatDisabled} />
+            {match.env.networkEnabled && !match.env.wsUrl && !match.env.apiBase ? (
+              <div className="smallNote" style={{ marginTop: 8 }}>
+                Networking is enabled but <span className="kbd">REACT_APP_WS_URL</span>/<span className="kbd">REACT_APP_API_BASE</span> are unset; chat will local-echo only.
+              </div>
+            ) : null}
           </div>
         </Sidebar>
       </div>
@@ -299,30 +304,6 @@ function MatchRoomInner() {
         onCancel={() => controller.dismissPromotion()}
       />
     </div>
-  );
-}
-
-function ChatComposer({ onSend }) {
-  const [text, setText] = useState("");
-
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        const v = text.trim();
-        if (!v) return;
-        onSend?.(v);
-        setText("");
-      }}
-      style={{ marginTop: 10 }}
-    >
-      <div className="row">
-        <input className="input" value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" />
-        <button type="submit" className="btn btnPrimary" style={{ flex: "0 0 auto", padding: "0 14px" }}>
-          Send
-        </button>
-      </div>
-    </form>
   );
 }
 
@@ -338,4 +319,3 @@ export function MatchRoomPage() {
     </MatchProvider>
   );
 }
-

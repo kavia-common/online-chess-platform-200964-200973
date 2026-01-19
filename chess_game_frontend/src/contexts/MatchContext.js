@@ -21,6 +21,20 @@ function inferOpponentPresent(players) {
   return Boolean(w && b);
 }
 
+function safeNow() {
+  return Date.now();
+}
+
+function makeChatMessage({ id, from, message, ts, gameId }) {
+  return {
+    id: id || `local-${safeNow()}-${Math.random().toString(16).slice(2)}`,
+    from: from || "player",
+    message: String(message || ""),
+    ts: typeof ts === "number" ? ts : safeNow(),
+    gameId: gameId || null,
+  };
+}
+
 // PUBLIC_INTERFACE
 export function MatchProvider({ gameId, children }) {
   /** Manages per-match state: WS connection + current FEN/history + players/ready/chat. */
@@ -40,7 +54,10 @@ export function MatchProvider({ gameId, children }) {
   const [playerColor, setPlayerColor] = useState(null); // "w" | "b"
   const [players, setPlayers] = useState({ white: null, black: null });
   const [ready, setReady] = useState({ white: false, black: false });
-  const [chat, setChat] = useState([]);
+
+  // Per-game channel support: store messages by gameId, but expose current game's list.
+  const [chatByGame, setChatByGame] = useState(() => ({}));
+  const chat = useMemo(() => chatByGame?.[gameId] || [], [chatByGame, gameId]);
 
   const [fen, setFen] = useState(chessRef.current.fen());
   const [history, setHistory] = useState(chessRef.current.history({ verbose: true }));
@@ -95,7 +112,7 @@ export function MatchProvider({ gameId, children }) {
     reconnectAttemptRef.current += 1;
     const attempt = reconnectAttemptRef.current;
 
-    setConnectionStatus(attempt <= 1 ? "reconnecting" : "reconnecting");
+    setConnectionStatus("reconnecting");
     const backoff = Math.min(8000, 800 + attempt * 700);
 
     reconnectTimerRef.current = setTimeout(() => {
@@ -104,6 +121,14 @@ export function MatchProvider({ gameId, children }) {
       connect();
     }, backoff);
   }, [env.networkEnabled, env.wsUrl]);
+
+  const appendChat = useCallback((gid, msg) => {
+    setChatByGame((prev) => {
+      const existing = prev?.[gid] || [];
+      const next = [...existing, msg].slice(-200);
+      return { ...(prev || {}), [gid]: next };
+    });
+  }, []);
 
   const onWsMessage = useCallback(
     (data) => {
@@ -116,7 +141,7 @@ export function MatchProvider({ gameId, children }) {
         // {type:"player_join", payload:{players}}
         // {type:"player_leave", payload:{players}}
         // {type:"ready", payload:{ready}}
-        // {type:"chat", payload:{id, from, message, ts}}
+        // {type:"chat", payload:{id, from, message, ts, gameId?}}
         // {type:"offer", payload:{kind:"draw"|"resign"|...}}
         const type = evt?.type;
         const payload = evt?.payload || evt;
@@ -138,8 +163,11 @@ export function MatchProvider({ gameId, children }) {
         }
 
         if (type === "chat") {
-          const msg = payload?.message;
-          if (msg) setChat((prev) => [...prev, { ...payload, ts: payload?.ts || Date.now() }].slice(-200));
+          const text = payload?.message;
+          if (text) {
+            const gid = payload?.gameId || gameId;
+            appendChat(gid, makeChatMessage({ ...payload, message: text, gameId: gid }));
+          }
           return;
         }
 
@@ -156,6 +184,9 @@ export function MatchProvider({ gameId, children }) {
                 promotion: payload.promotion || undefined,
               });
               if (move) {
+                // Add per-move timestamp for enhanced MoveList display.
+                move.ts = payload?.ts || safeNow();
+
                 setFen(chessRef.current.fen());
                 setHistory(chessRef.current.history({ verbose: true }));
                 setLastMove({ from: payload.from, to: payload.to });
@@ -174,7 +205,7 @@ export function MatchProvider({ gameId, children }) {
         // ignore non-JSON
       }
     },
-    [applyAuthoritativeState, toast]
+    [applyAuthoritativeState, appendChat, gameId, toast]
   );
 
   const connect = useCallback(() => {
@@ -235,23 +266,34 @@ export function MatchProvider({ gameId, children }) {
       const text = String(message || "").trim();
       if (!text) return false;
 
-      // Optimistic append
-      setChat((prev) => [...prev, { id: `local-${Date.now()}`, from: "you", message: text, ts: Date.now() }].slice(-200));
+      // Always local-echo so UI works offline.
+      appendChat(gameId, makeChatMessage({ from: "you", message: text, gameId }));
 
-      // Prefer WS broadcast, but also provide REST fallback
-      const sentWs = connRef.current?.sendJson?.({ type: "chat", payload: { message: text } }) || false;
-      if (!sentWs && env.networkEnabled) {
+      // Prefer WS broadcast, but also provide REST fallback (when configured)
+      const canWs = Boolean(env.networkEnabled && env.wsUrl);
+      const canRest = Boolean(env.networkEnabled && env.apiBase);
+
+      const sentWs = canWs ? connRef.current?.sendJson?.({ type: "chat", payload: { message: text, ts: safeNow(), gameId } }) || false : false;
+      if (!sentWs && canRest) {
         await api.sendChat(gameId, text);
       }
       return true;
     },
-    [api, env.networkEnabled, gameId]
+    [api, appendChat, env.apiBase, env.networkEnabled, env.wsUrl, gameId]
   );
 
   const submitMove = useCallback(
     async ({ from, to, promotion, san, fenBefore, fenAfter }) => {
       // Prefer WS send, then REST.
-      const payload = { from, to, promotion: promotion || null, san: san || null, fenBefore: fenBefore || null, fenAfter: fenAfter || null };
+      const payload = {
+        from,
+        to,
+        promotion: promotion || null,
+        san: san || null,
+        fenBefore: fenBefore || null,
+        fenAfter: fenAfter || null,
+        ts: safeNow(),
+      };
 
       const sentWs = connRef.current?.sendJson?.({ type: "move", payload }) || false;
       if (!sentWs && env.networkEnabled) {
@@ -327,4 +369,3 @@ export function useMatch() {
   if (!ctx) throw new Error("useMatch must be used within MatchProvider");
   return ctx;
 }
-
